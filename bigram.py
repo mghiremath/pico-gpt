@@ -60,22 +60,48 @@ def estimate_loss():
     return out
 
 
+class Head(nn.Module):
+    """ one head of self-attention """
+
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(n_embd, head_size, bias = False)
+        self.query = nn.Linear(n_embd, head_size, bias = False)
+        self.value = nn.Linear(n_embd, head_size, bias = False)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size))) #
+    
+    def forward(self, x):
+        B, T, C = x.shape
+        k = self.key(x)   # (B, T, C)
+        q = self.query(x) # (B, T, C)
+        v = self.value(x)  # (B, T, C) These are learnable projections to transform input into keys, queries, and values for attention.
+        # compue attendtion scores ("affinities")
+        weights = q @ k.transpose(-2,-1) # (B, T, T)
+        weights = weights.masked_fill(self.tril[:T, :T]==0, float('-inf')) # for all tril elements that , make them -inf
+        weights = F.softmax(weights, dim=-1) # (B, T, T)
+        # perform weighted aggregation of values
+        out = weights @ v # (B, T, T) @  (B, T, C) --->  (B, T, C)
+
+        return out
+    
 class BigramLanguageModel(nn.Module):
 
     def __init__(self):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd) #to embed each token as a vector of size n_embd.
         # we want to encode the token position along with their identities
-        self.position_embedding_table = nn.Embedding(block_size, n_embd) # it is an embedding of block size by n_embd - each position from 0->block_size-1 will also gets their own embedding vector
+        self.position_embedding_table = nn.Embedding(block_size, n_embd) # to embed each position as a vector of size n_embd. it is an embedding of block size by n_embd - each position from 0->block_size-1 will also gets their own embedding vector
+        self.sa_head = Head(n_embd) # self-attention head
         self.lm_head = nn.Linear(n_embd, vocab_size) # language model head initialising a linear layer
-    
+
     def forward(self, idx, targets=None):
         B, T = idx.shape
         # idx and targets are both (B,T) tensor of integers
         token_embd = self.token_embedding_table(idx) # (B,T,C) # we are encoding the identity of the tokens by taking in indices
         pos_embd = self.position_embedding_table(torch.arange(T, device=device)) #(T, C)
-        x = token_embd + pos_embd
+        x = token_embd + pos_embd #(B, T, C)
+        x = self.sa_head(x) # apply one head of self-attention. (B, T, C)
         logits = self.lm_head(x) #(B, T, vocab_size)
         if targets is None:
             loss = None
@@ -89,8 +115,10 @@ class BigramLanguageModel(nn.Module):
     def generate(self, idx, max_new_tokens):
         # idx is (B,T) array of indices in the current context
         for _ in range(max_new_tokens):
+            # crop idx to the last block_size tokens else it's going to run out of scope
+            idx_cond = idx[:, -block_size:]
             # get the predictions
-            logits, loss = self(idx)
+            logits, loss = self(idx_cond)
             # focus only on the last time step
             logits = logits[:, -1, :] # becomes (B,C)
             # apply softmax to get probabilities
